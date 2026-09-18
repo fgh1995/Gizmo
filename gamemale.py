@@ -23,7 +23,7 @@ def setup_logger(name, verbose=False):
     return logger
 
 class Gamemale:
-    def __init__(self, username, password, questionid='0', answer=None, verbose=False):
+    def __init__(self, username, password, questionid='0', answer=None, cookie=None, verbose=False):
         self.verbose = verbose
         self.main_logger = setup_logger('GameMale', verbose)
         self.login_logger = setup_logger('登录', verbose)
@@ -31,8 +31,8 @@ class Gamemale:
         self.exchange_logger = setup_logger('抽奖', verbose)
         
         self.login_logger.debug(f"当前用户: {username}")
-        
-        self.ocr = ddddocr.DdddOcr(show_ad=False)
+
+        self.ocr = None  # 惰性初始化，cookie 模式下无需加载 OCR
         self.post_formhash = None
         self.sign_result = None
         self.exchange_result = None
@@ -40,6 +40,7 @@ class Gamemale:
         self.password = str(password)
         self.questionid = questionid
         self.answer = str(answer) if answer else ""
+        self.cookie = str(cookie) if cookie else ""
         self.hostname = "www.gamemale.com"
         self.session = requests.session()
         self.session.headers.update({
@@ -69,7 +70,10 @@ class Gamemale:
 
     def verify_code(self, max_retries=10) -> str:
         self.login_logger.info(f"看我 slay 验证码 [最多暗娼 {max_retries} 次惹]")
-        
+        if self.ocr is None:
+            self.login_logger.debug("正在初始化 OCR 引擎")
+            self.ocr = ddddocr.DdddOcr(show_ad=False)
+
         for attempt in range(1, max_retries + 1):
             update_url = (
                 f"https://{self.hostname}/misc.php?mod=seccode&action=update"
@@ -112,13 +116,50 @@ class Gamemale:
         self.login_logger.error("超出最大重试次数，验证码识别失败")
         return ""
 
+    def login_with_cookie(self) -> bool:
+        """验证码识别失败时的回退方案：使用环境变量中的 cookie 直接登录"""
+        cookie_str = (self.cookie or "").strip()
+        if not cookie_str:
+            self.login_logger.error("环境变量 COOKIE 未设置，cookie 模式回退失败")
+            return False
+
+        self.login_logger.info("验证码识别失败，回退到 cookie 模式")
+        for pair in cookie_str.split(';'):
+            pair = pair.strip()
+            if not pair or '=' not in pair:
+                continue
+            name, _, value = pair.partition('=')
+            self.session.cookies.set(name.strip(), value.strip(), domain=self.hostname)
+
+        try:
+            text = self.session.get(f"https://{self.hostname}/forum.php").text
+        except Exception as e:
+            self.login_logger.error(f"cookie 模式访问论坛主页出错: {e}")
+            return False
+
+        if 'member.php?mod=logging&action=logout' not in text:
+            self.login_logger.error("cookie 无效或已过期，未检测到登录状态")
+            return False
+
+        formhash_match = re.search(
+            r'<input type="hidden" name="formhash" value="(.+?)" />',
+            text
+        )
+        if not formhash_match:
+            self.login_logger.error("cookie 模式下无法获取 formhash")
+            return False
+
+        self.post_formhash = formhash_match.group(1)
+        self.login_logger.info("cookie 模式登录成功")
+        return True
+
     def login(self) -> bool:
         self.login_logger.info(f"开始登录噜")
         
         code = self.verify_code()
         if not code:
-            self.login_logger.error("缺少验证码，无法执行登录流程")
-            return False
+            self.login_logger.warning("缺少验证码，尝试回退到 cookie 模式")
+            return self.login_with_cookie()
         loginhash, formhash = self.get_login_formhash()
         login_url = (
             f"https://{self.hostname}/member.php?mod=logging&action=login"
@@ -263,14 +304,15 @@ class Gamemale:
 def main():
     username = os.getenv("USERNAME")
     password = os.getenv("PASSWORD")
+    cookie = os.getenv("COOKIE")
     # questionid = os.getenv("QID")
     # answer = os.getenv("ANSWER")
-    
+
     if not username or not password:
         logger = setup_logger("GameMale")
         logger.error("天啦噜，信息不全就想登录？")
         exit(1)
-    gm = Gamemale(username, password, verbose=False)
+    gm = Gamemale(username, password, cookie=cookie, verbose=False)
     gm.run()
 
 if __name__ == "__main__":

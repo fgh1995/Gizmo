@@ -26,5 +26,6 @@ jobs:
         env:
           USERNAME: ${{ secrets.GM_USERNAME }}
           PASSWORD: ${{ secrets.GM_PASSWORD }}
+          COOKIE: ${{ secrets.GM_COOKIE }}
         run: |
           python gamemale.py
